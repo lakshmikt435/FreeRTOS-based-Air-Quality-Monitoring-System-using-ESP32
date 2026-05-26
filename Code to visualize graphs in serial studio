@@ -1,0 +1,103 @@
+#include "DHT.h"
+
+#define DHTPIN 23
+#define DHTTYPE DHT11
+#define MQ7_PIN 34
+#define MQ135_PIN 35
+#define LED_PIN 18        
+
+#define AQI_THRESHOLD 150 
+
+DHT dht(DHTPIN, DHTTYPE);
+
+// Shared Global Variables
+volatile float humidity = 0.0;
+volatile float temperature = 0.0;
+volatile int mq7_raw = 0;
+volatile int mq135_raw = 0;
+volatile int global_aqi = 0;
+
+// Internal Metric Registers (Kept for background profiling, omitted from graph stream)
+volatile long rtos_latency = 0;
+volatile unsigned long rtos_response_time = 0;
+volatile int active_task_id = 0; 
+
+TaskHandle_t TaskDHTHandle = NULL;
+TaskHandle_t TaskMQHandle = NULL;
+TaskHandle_t TaskReportHandle = NULL;
+
+void vTaskDHT(void *pvParameters);
+void vTaskMQ(void *pvParameters);
+void vTaskReport(void *pvParameters);
+
+void setup() {
+  Serial.begin(115200);
+  dht.begin();
+  pinMode(MQ7_PIN, INPUT);
+  pinMode(MQ135_PIN, INPUT);
+  pinMode(LED_PIN, OUTPUT); 
+
+  xTaskCreatePinnedToCore(vTaskDHT, "DHT_Task", 3000, NULL, 2, &TaskDHTHandle, 0);
+  xTaskCreatePinnedToCore(vTaskMQ, "MQ_Task", 2048, NULL, 2, &TaskMQHandle, 0);
+  xTaskCreatePinnedToCore(vTaskReport, "Report_Task", 3000, NULL, 1, &TaskReportHandle, 1);
+}
+
+void loop() {
+  vTaskDelete(NULL); 
+}
+
+void vTaskDHT(void *pvParameters) {
+  TickType_t xLastWakeTime = xTaskGetTickCount();
+  const TickType_t xFrequency = pdMS_TO_TICKS(2000);
+
+  for (;;) {
+    active_task_id = 1; 
+    
+    TickType_t currentTick = xTaskGetTickCount();
+    rtos_latency = (currentTick - (xLastWakeTime + xFrequency)) * portTICK_PERIOD_MS * 1000;
+    if(rtos_latency < 0) rtos_latency = 0;
+
+    unsigned long responseStartMicros = micros();
+    temperature = dht.readTemperature();
+    humidity = dht.readHumidity();
+    rtos_response_time = micros() - responseStartMicros;
+
+    xTaskDelayUntil(&xLastWakeTime, xFrequency);
+  }
+}
+
+void vTaskMQ(void *pvParameters) {
+  for (;;) {
+    active_task_id = 2; 
+    
+    mq7_raw = analogRead(MQ7_PIN);
+    mq135_raw = analogRead(MQ135_PIN);
+    global_aqi = map(mq135_raw, 0, 4095, 0, 500);
+
+    if (global_aqi > AQI_THRESHOLD) {
+      digitalWrite(LED_PIN, HIGH);
+    } else {
+      digitalWrite(LED_PIN, LOW);
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(500));
+  }
+}
+
+void vTaskReport(void *pvParameters) {
+  for (;;) {
+    active_task_id = 3; 
+    vTaskDelay(pdMS_TO_TICKS(200)); 
+
+    if (!isnan(humidity) && !isnan(temperature)) {
+      // ONLY environmental data channels are pushed out to Serial Studio
+      Serial.print("/*");
+      Serial.print(temperature, 1);     Serial.print(","); // Channel 1
+      Serial.print(humidity, 1);        Serial.print(","); // Channel 2
+      Serial.print(mq7_raw);            Serial.print(","); // Channel 3
+      Serial.print(mq135_raw);          Serial.print(","); // Channel 4
+      Serial.print(global_aqi);                            // Channel 5
+      Serial.println("*/"); 
+    }
+  }
+}
