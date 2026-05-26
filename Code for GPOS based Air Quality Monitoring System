@@ -1,0 +1,75 @@
+#include "DHT.h"
+
+#define DHTPIN 23
+#define DHTTYPE DHT11
+#define MQ7_PIN 34
+#define MQ135_PIN 35
+
+DHT dht(DHTPIN, DHTTYPE);
+
+unsigned long lastSensorRead = 0;
+const unsigned long interval = 2000; 
+
+// Efficiency variables
+unsigned long totalExecutionTime = 0;
+unsigned long totalRunTime = 0;
+unsigned long startTime = 0;
+
+void setup() {
+  Serial.begin(115200);
+  dht.begin();
+  pinMode(MQ7_PIN, INPUT);
+  pinMode(MQ135_PIN, INPUT);
+  Serial.println("Non-RTOS Profiling System Initialized.");
+  startTime = millis();
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+  unsigned long loopStartMicros = micros();
+
+  // Expected run time calculation for Latency
+  unsigned long targetTime = lastSensorRead + interval;
+  
+  if (currentMillis - lastSensorRead >= interval) {
+    // 1. Calculate Latency (Actual start time vs Expected target time)
+    long latencyMicros = micros() - (targetTime * 1000);
+    if(latencyMicros < 0) latencyMicros = 0; // Guard against initial boot variations
+
+    unsigned long responseStartMicros = micros();
+
+    // 2. Read Sensors
+    float humidity = dht.readHumidity();
+    float temperature = dht.readTemperature();
+    int mq7_raw = analogRead(MQ7_PIN);
+    int mq135_raw = analogRead(MQ135_PIN);
+
+    // 3. Process AQI (Linear approximation based on MQ135 curve)
+    // Map typical ADC range (0-4095) to AQI range (0-500)
+    int aqi = map(mq135_raw, 0, 4095, 0, 500); 
+
+    // 4. Calculate Response Time
+    unsigned long responseTimeMicros = micros() - responseStartMicros;
+    lastSensorRead = currentMillis;
+
+    // Output Data and Performance Metrics
+    Serial.println("\n--- [NON-RTOS METRICS] ---");
+    if (!isnan(humidity) && !isnan(temperature)) {
+      Serial.printf("DATA -> Temp: %.1f°C | Hum: %.1f%% | MQ7: %d | MQ135: %d | Calculated AQI: %d\n", 
+                    temperature, humidity, mq7_raw, mq135_raw, aqi);
+    } else {
+      Serial.println("DATA -> DHT Sensor Read Error!");
+    }
+    
+    // Efficiency Calculation up to this point
+    float efficiency = ((float)totalExecutionTime / ((millis() - startTime) * 1000)) * 100.0;
+
+    Serial.printf("PERF -> Latency: %ld us\n", latencyMicros);
+    Serial.printf("PERF -> Response Time: %lu us\n", responseTimeMicros);
+    Serial.printf("PERF -> Active Processing Efficiency: %.4f%%\n", efficiency);
+    Serial.println("--------------------------");
+  }
+
+  // Tracking CPU busy cycles vs idle cycles
+  totalExecutionTime += (micros() - loopStartMicros);
+}
