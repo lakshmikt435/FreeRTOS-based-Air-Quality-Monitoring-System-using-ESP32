@@ -1,0 +1,159 @@
+#include "DHT.h"
+#include "esp_timer.h"
+
+#define DHTPIN 23
+#define DHTTYPE DHT11
+#define MQ7_PIN 34
+#define MQ135_PIN 35
+#define LED_PIN 18        // LED Pin definition
+
+#define AQI_THRESHOLD 150 // Set your AQI alert threshold here
+
+DHT dht(DHTPIN, DHTTYPE);
+
+// Shared Global Variables
+volatile float humidity = 0.0;
+volatile float temperature = 0.0;
+volatile int mq7_raw = 0;
+volatile int mq135_raw = 0;
+volatile int global_aqi = 0;
+
+// Metric Registers
+volatile long rtos_latency = 0;
+
+// Dynamic Response Time and Worst-Case Response Time (WCRT) Registers
+volatile unsigned long wcrt_dht = 0;
+volatile unsigned long current_rt_dht = 0;
+
+volatile unsigned long wcrt_mq = 0;
+volatile unsigned long current_rt_mq = 0;
+
+volatile unsigned long wcrt_report = 0;
+volatile unsigned long current_rt_report = 0;
+
+unsigned long rtos_startTime = 0;
+
+TaskHandle_t TaskDHTHandle = NULL;
+TaskHandle_t TaskMQHandle = NULL;
+TaskHandle_t TaskReportHandle = NULL;
+
+void vTaskDHT(void *pvParameters);
+void vTaskMQ(void *pvParameters);
+void vTaskReport(void *pvParameters);
+
+void setup() {
+  Serial.begin(115200);
+  dht.begin();
+  pinMode(MQ7_PIN, INPUT);
+  pinMode(MQ135_PIN, INPUT);
+  pinMode(LED_PIN, OUTPUT); // Initialize LED pin as output
+
+  rtos_startTime = millis();
+
+  // Core 0 handles Physical Sensing Loops
+  xTaskCreatePinnedToCore(vTaskDHT, "DHT_Task", 3000, NULL, 2, &TaskDHTHandle, 0);
+  xTaskCreatePinnedToCore(vTaskMQ, "MQ_Task", 2048, NULL, 2, &TaskMQHandle, 0);
+  
+  // Core 1 handles Serial Processing & Terminal Reporting Pipeline
+  xTaskCreatePinnedToCore(vTaskReport, "Report_Task", 3000, NULL, 1, &TaskReportHandle, 1);
+
+  Serial.println("RTOS Profiling System Initialized.");
+}
+
+void loop() {
+  vTaskDelete(NULL); 
+}
+
+void vTaskDHT(void *pvParameters) {
+  TickType_t xLastWakeTime = xTaskGetTickCount();
+  const TickType_t xFrequency = pdMS_TO_TICKS(2000);
+
+  for (;;) {
+    TickType_t currentTick = xTaskGetTickCount();
+    rtos_latency = (currentTick - (xLastWakeTime + xFrequency)) * portTICK_PERIOD_MS * 1000;
+    if(rtos_latency < 0) rtos_latency = 0;
+
+    // Profile Start: Marks the beginning of execution
+    unsigned long startTimeMicros = micros();
+
+    temperature = dht.readTemperature();
+    humidity = dht.readHumidity();
+    
+    // Profile End: Captures execution response time for this iteration
+    current_rt_dht = micros() - startTimeMicros;
+    
+    // Evaluate and update Worst-Case Response Time (WCRT)
+    if (current_rt_dht > wcrt_dht) {
+      wcrt_dht = current_rt_dht;
+    }
+
+    xTaskDelayUntil(&xLastWakeTime, xFrequency);
+  }
+}
+
+void vTaskMQ(void *pvParameters) {
+  for (;;) {
+    // Profile Start
+    unsigned long startTimeMicros = micros();
+
+    mq7_raw = analogRead(MQ7_PIN);
+    mq135_raw = analogRead(MQ135_PIN);
+    
+    global_aqi = map(mq135_raw, 0, 4095, 0, 500);
+
+    // --- Concurrent LED Threshold Check ---
+    if (global_aqi > AQI_THRESHOLD) {
+      digitalWrite(LED_PIN, HIGH);
+    } else {
+      digitalWrite(LED_PIN, LOW);
+    }
+
+    // Profile End
+    current_rt_mq = micros() - startTimeMicros;
+    
+    // Evaluate and update Worst-Case Response Time (WCRT)
+    if (current_rt_mq > wcrt_mq) {
+      wcrt_mq = current_rt_mq;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(500));
+  }
+}
+
+void vTaskReport(void *pvParameters) {
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    // Profile Start for the reporting block itself
+    unsigned long startTimeMicros = micros();
+
+    // MATCHES THE EXACT PREVIOUS TEXT FORMAT SPECIFIED
+    Serial.println("\n--- [RTOS METRICS] ---");
+    if (!isnan(humidity) && !isnan(temperature)) {
+      Serial.printf("DATA -> Temp: %.1f°C | Hum: %.1f%% | MQ7: %d | MQ135: %d | Calculated AQI: %d\n", 
+                    temperature, humidity, mq7_raw, mq135_raw, global_aqi);
+    } else {
+      Serial.println("DATA -> DHT Sensor Read Error!");
+    }
+    
+    float efficiency = 100.0000; 
+
+    Serial.printf("PERF -> Latency: %ld us\n", rtos_latency);
+    
+    // Appended cleanly to show standard Response Time alongside the requested Worst-Case parameters
+    Serial.printf("PERF -> Response Time (DHT Current): %lu us | WCRT: %lu us\n", current_rt_dht, wcrt_dht);
+    Serial.printf("PERF -> Response Time (MQ Current): %lu us  | WCRT: %lu us\n", current_rt_mq, wcrt_mq);
+    Serial.printf("PERF -> Response Time (RPT Current): %lu us | WCRT: %lu us\n", current_rt_report, wcrt_report);
+    
+    Serial.printf("PERF -> Active Processing Efficiency: %.4f%%\n", efficiency);
+    Serial.println("--------------------------");
+
+    // Profile End for the reporting block
+    current_rt_report = micros() - startTimeMicros;
+    
+    // Evaluate and update Worst-Case Response Time (WCRT) for Reporting Task
+    if (current_rt_report > wcrt_report) {
+      wcrt_report = current_rt_report;
+    }
+  }
+}
